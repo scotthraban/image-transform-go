@@ -20,5 +20,5 @@
 # Go workspace file
 go.work
 
-# output executable
-image-transform
+# output commands
+bin

@@ -1,6 +1,6 @@
 FROM golang:1.20.3-alpine3.17 AS mod_download
 
-WORKDIR /src
+WORKDIR /go/src
 
 COPY src/go.mod ./
 
@@ -8,16 +8,16 @@ RUN go mod download
 
 FROM mod_download AS builder
 
-WORKDIR /src
+WORKDIR /go/src
 
 COPY src/ ./
 
-RUN go build .
+RUN go install .
 
 FROM alpine:3.17
 
 WORKDIR /app
 
-COPY --from=builder /src/image-transform ./
+COPY --from=builder /go/bin/image-transform-go ./
 
-ENTRYPOINT ["./image-transform"]
+ENTRYPOINT ["./image-transform-go"]

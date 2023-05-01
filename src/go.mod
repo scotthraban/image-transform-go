@@ -1,4 +1,4 @@
-module hraban.com/image-transform
+module github.com/scotthraban/image-transform-go
 
 go 1.20
 

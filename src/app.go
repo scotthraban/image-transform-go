@@ -5,17 +5,16 @@ import (
 	"errors"
     "fmt"
     "image"
-    "image/color"
-    "image/jpeg"
+    // "image/color"
+    // "image/jpeg"
     "log"
     "net/http"
     "os"
-    "path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-    "github.com/disintegration/imaging"
+    // "github.com/disintegration/imaging"
     _ "github.com/go-sql-driver/mysql"
 )
 
@@ -71,7 +70,7 @@ func transformPhoto(filePath string, rotation int, modified string, size string)
     }
     defer file.Close()
 
-    img, _, err := image.Decode(file)
+    _, _, err = image.Decode(file)
     if err != nil {
 		log.Printf("failed to decode image from file %s: %v", filePath, err)
 		return errors.New("Internal server error")
