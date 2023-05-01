@@ -5,16 +5,19 @@ import (
 	"errors"
     "fmt"
     "image"
-    // "image/color"
-    // "image/jpeg"
+    "image/color"
+    "image/jpeg"
+	"io/ioutil"
     "log"
+	"math"
     "net/http"
     "os"
 	"strconv"
 	"strings"
 	"time"
 
-    // "github.com/disintegration/imaging"
+	"github.com/google/uuid"
+    "github.com/disintegration/imaging"
     _ "github.com/go-sql-driver/mysql"
 )
 
@@ -48,48 +51,111 @@ func getPhoto(w http.ResponseWriter, r *http.Request) {
 	}
 
     // Look up the photo information from the database
-    filePath, rotation, modified, err := lookupPhotoInfo(id)
+    filePath, rotation, _, err := lookupPhotoInfo(id)
     if err != nil {
         http.Error(w, fmt.Sprintf("%v", err), http.StatusNotFound)
         return
     }
 
-	err = transformPhoto(filePath, rotation, modified, params["size"])
-	if err != nil {
-        http.Error(w, fmt.Sprintf("%v", err), http.StatusInternalServerError)
-		return
-	}
-}
+	// TODO: return from cache, modified == _
 
-func transformPhoto(filePath string, rotation int, modified string, size string) (error) {
-    // Open the file and decode it as an image
     file, err := os.Open(filePath)
     if err != nil {
 		log.Printf("failed to open file %s: %v", filePath, err)
-		return errors.New("Internal server error")
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
     }
     defer file.Close()
 
-    _, _, err = image.Decode(file)
-    if err != nil {
-		log.Printf("failed to decode image from file %s: %v", filePath, err)
-		return errors.New("Internal server error")
-    }
+    w.Header().Set("Content-Type", "image/jpeg")
 
-    // Rotate the image by 90 degrees clockwise
-    // rotatedImg := imaging.Rotate(img, 90, color.Black)
+    if params["action"] == "download" {
+		filename := params["name"]
+		if filename != "" {
+			filename = fmt.Sprintf("photo-%s.jpg", uuid.New().String())
+		}
+	    w.Header().Set("Content-Disposition", "attachment; filename=" + filename)
+	}
 
-    // Resize the image to 300x300 pixels
-    // resizedImg := resize.Resize(300, 300, rotatedImg, resize.Lanczos3)
+	factor, boxWidth, boxHeight := getTransforms(params["size"])
+	if factor != 0 || (boxWidth != 0 && boxHeight != 0) {
+		img, err := transformPhoto(file, factor, boxWidth, boxHeight, rotation * -1)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("%v", err), http.StatusInternalServerError)
+			return
+		}
 
-    // Encode the resulting image in JPEG format
-    // err = jpeg.Encode(w, rotatedImg, nil)
-    // if err != nil {
-    //     log.Printf("failed to encode image as JPEG: %v", err)
-	// 	return errors.New("Internal server error")
-    // }
+		err = jpeg.Encode(w, img, nil)
+		if err != nil {
+		    log.Printf("failed to encode image as JPEG: %v", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
 
-	return nil
+		// TODO: Cache
+
+	} else {
+    	img, err := ioutil.ReadAll(file)
+	    if err != nil {
+			log.Printf("failed to read file %s: %v", filePath, err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Length", strconv.Itoa(len(img)))
+
+		_, err = w.Write(img)
+		if err != nil {
+			log.Printf("failed to write response %s: %v", filePath, err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		// TODO: Cache
+		
+	}
+}
+
+func transformPhoto(file *os.File, factor int, boxWidth int, boxHeight int, rotation int) (image.Image, error) {
+	img, _, err := image.Decode(file)
+	if err != nil {
+		log.Printf("failed to decode image from file %s: %v", file.Name(), err)
+		return nil, errors.New("Internal server error")
+	}
+
+	bounds := img.Bounds()
+	origWidth := bounds.Dx()
+	origHeight := bounds.Dy()
+
+	var targetWidth int
+	var targetHeight int
+	if factor != 0 {
+		targetWidth = origWidth / factor
+		targetHeight = origHeight / factor
+	} else if (boxWidth != 0 && boxHeight != 0) {
+
+		rotatedWidth := origWidth
+		rotatedHeight := origHeight
+		if rotation == 90 || rotation == -90 || rotation == -270 {
+			rotatedWidth = origHeight
+			rotatedHeight = origWidth
+		}
+
+		ratioWidth := rotatedWidth / boxWidth
+		ratioHeight := rotatedHeight / boxHeight
+		ratio := math.Max(float64(ratioWidth), float64(ratioHeight))
+
+		targetWidth = rotatedWidth / int(ratio)
+		targetHeight = rotatedHeight / int(ratio)
+	}
+
+	// TODO: Try other algos for performance
+	img = imaging.Resize(img, targetWidth, targetHeight, imaging.Lanczos)
+
+	if (rotation != 0) {
+		img = imaging.Rotate(img, float64(rotation), color.Black)
+	}
+
+	return img, nil
 }
 
 func lookupPhotoInfo(id int) (string, int, string, error) {
@@ -117,6 +183,43 @@ func lookupPhotoInfo(id int) (string, int, string, error) {
 	}
 
     return filePath, rotation, modified, nil
+}
+
+func getTransforms(size string) (int, int, int) {
+	switch size {
+	case "full":
+		return 1, 0, 0
+	case "half":
+		return 2, 0, 0
+	case "quarter":
+		return 4, 0, 0
+	case "eighth":
+		return 8, 0, 0
+	case "xsmall":
+		return 0, 80, 80
+	case "small":
+		return 0, 160, 160
+	case "medium":
+		return 0, 320, 320
+	case "large":
+		return 0, 640, 480
+	case "xlarge":
+		return 0, 800, 600
+	case "xxlarge":
+		return 0, 1024, 768
+	case "xxxlarge":
+		return 0, 1280, 1024
+	case "xxxxlarge":
+		return 0, 1600, 1200
+	case "tivo":
+		return 0, 320, 320
+	case "blog":
+		return 0, 852, 852
+	case "home":
+		return 0, 990, 990
+	default:
+		return 0, 0, 0
+	}
 }
 
 func getParamsFromUrl(r *http.Request) map[string]string {
