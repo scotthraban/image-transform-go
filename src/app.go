@@ -24,8 +24,10 @@ import (
 var db *sql.DB
 
 func main() {
+	var err error
+
     // Connect to the MariaDB database
-    db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:3306)/%s", getDbUsername(), getDbPassword(), getDbHost(), getDbTable()))
+    db, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:3306)/%s", getDbUsername(), getDbPassword(), getDbHost(), getDbTable()))
     if err != nil {
 		log.Fatal(fmt.Sprintf("Failure connecting to database (%v)", err))
     }
@@ -132,25 +134,16 @@ func transformPhoto(file *os.File, factor int, boxWidth int, boxHeight int, rota
 		targetWidth = origWidth / factor
 		targetHeight = origHeight / factor
 	} else if (boxWidth != 0 && boxHeight != 0) {
-
-		rotatedWidth := origWidth
-		rotatedHeight := origHeight
-		if rotation == 90 || rotation == -90 || rotation == -270 {
-			rotatedWidth = origHeight
-			rotatedHeight = origWidth
-		}
-
-		ratioWidth := rotatedWidth / boxWidth
-		ratioHeight := rotatedHeight / boxHeight
+		ratioWidth := origWidth / boxWidth
+		ratioHeight := origHeight / boxHeight
 		ratio := math.Max(float64(ratioWidth), float64(ratioHeight))
 
-		targetWidth = rotatedWidth / int(ratio)
-		targetHeight = rotatedHeight / int(ratio)
+		targetWidth = origWidth / int(ratio)
+		targetHeight = origHeight / int(ratio)
 	}
 
-	// TODO: Try other algos for performance
-	img = imaging.Resize(img, targetWidth, targetHeight, imaging.Lanczos)
-
+	log.Printf("TRANSFORM: rotate: %d, width / height: %d / %d", rotation, targetWidth, targetHeight)
+	img = imaging.Resize(img, targetWidth, targetHeight, imaging.CatmullRom)
 	if (rotation != 0) {
 		img = imaging.Rotate(img, float64(rotation), color.Black)
 	}
@@ -169,16 +162,16 @@ func lookupPhotoInfo(id int) (string, int, string, error) {
 		"WHERE id_photo = ?",
 		id).Scan(&path, &rotation, &modified)
     if err != nil {
-		log.Printf("failed to find photo with id %s: %v", id, err)
-        return "", 0, "", errors.New(fmt.Sprintf("failed to find photo with id %s", id))
+		log.Printf("failed to find photo with id %d: %v", id, err)
+        return "", 0, "", errors.New(fmt.Sprintf("failed to find photo with id %d", id))
     }
 
 	filePath := "/mnt/photos/" + path
 	_, err = os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("photo file does not exist (%v)", err)
-			return "", 0, "", errors.New(fmt.Sprintf("failed to find photo with id %s", id))
+			log.Printf("photo file (%s) does not exist (%v)", filePath, err)
+			return "", 0, "", errors.New(fmt.Sprintf("failed to find photo with id %d", id))
 		}
 	}
 
