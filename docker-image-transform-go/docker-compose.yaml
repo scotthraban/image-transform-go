@@ -1,0 +1,39 @@
+version: '3.1'
+
+services:
+
+  db-photos:
+    image: mariadb:10.6.0
+    volumes:
+      - $PWD/init/db/photos:/docker-entrypoint-initdb.d
+    environment:
+      MARIADB_ROOT_PASSWORD: password
+      MARIADB_DATABASE: photos2
+      MARIADB_USER: photos
+      MARIADB_PASSWORD: photos
+
+  image-transform-go:
+    image: image-transform-go:latest
+    depends_on:
+      - db-photos
+    ports:
+      - 8080:8080
+    volumes:
+      - /mnt/photos:/mnt/photos
+    environment:
+      DB_HOST: db-photos
+      DB_TABLE: photos2
+      DB_USERNAME: photos
+      DB_PASSWORD: photos
+
+  image-transform:
+    image: image-transform:latest
+    ports:
+      - 8081:8080
+    volumes:
+      - /mnt/photos:/mnt/photos
+    environment:
+      DB_HOST: db-photos
+      DB_TABLE: photos2
+      DB_USERNAME: photos
+      DB_PASSWORD: photos
