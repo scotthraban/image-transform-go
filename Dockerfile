@@ -4,7 +4,7 @@ WORKDIR /go/src
 
 COPY src/go.mod ./
 
-RUN go mod download
+RUN apk add musl-dev vips-dev gcc && go mod download
 
 FROM mod_download AS builder
 
@@ -17,6 +17,8 @@ RUN go install .
 FROM alpine:3.17
 
 WORKDIR /app
+
+RUN apk add vips
 
 COPY --from=builder /go/bin/image-transform-go ./
 

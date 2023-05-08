@@ -1,12 +1,10 @@
 package main
 
 import (
+	"crypto/md5"
     "database/sql"
 	"errors"
     "fmt"
-    "image"
-    "image/color"
-    "image/jpeg"
 	"io/ioutil"
     "log"
 	"math"
@@ -17,16 +15,20 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-    "github.com/disintegration/imaging"
+	"github.com/davidbyttow/govips/v2/vips"
     _ "github.com/go-sql-driver/mysql"
 )
 
 var db *sql.DB
+var lfuCache map[string][]byte
+var lfuCacheCounts map[string]int
 
 func main() {
 	var err error
 
-    // Connect to the MariaDB database
+    lfuCache = make(map[string][]byte)
+	lfuCacheCounts = make(map[string]int)
+
     db, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:3306)/%s", getDbUsername(), getDbPassword(), getDbHost(), getDbTable()))
     if err != nil {
 		log.Fatal(fmt.Sprintf("Failure connecting to database (%v)", err))
@@ -37,6 +39,9 @@ func main() {
 	db.SetConnMaxIdleTime(5 * time.Minute)
 
     defer db.Close()
+
+	vips.Startup(&vips.Config{ ConcurrencyLevel : getConcurrencyLevel() })
+	defer vips.Shutdown()
 
 	http.HandleFunc(getRootContext(), getPhoto)
 
@@ -52,21 +57,11 @@ func getPhoto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-    // Look up the photo information from the database
-    filePath, rotation, _, err := lookupPhotoInfo(id)
+    filePath, rotation, modified, err := lookupPhotoInfo(id)
     if err != nil {
         http.Error(w, fmt.Sprintf("%v", err), http.StatusNotFound)
         return
     }
-
-	// TODO: return from cache, modified == _
-
-    file, err := os.Open(filePath)
-    if err != nil {
-		log.Printf("failed to open file %s: %v", filePath, err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-    }
-    defer file.Close()
 
     w.Header().Set("Content-Type", "image/jpeg")
 
@@ -78,81 +73,94 @@ func getPhoto(w http.ResponseWriter, r *http.Request) {
 	    w.Header().Set("Content-Disposition", "attachment; filename=" + filename)
 	}
 
-	factor, boxWidth, boxHeight := getTransforms(params["size"])
-	if factor != 0 || (boxWidth != 0 && boxHeight != 0) {
-		img, err := transformPhoto(file, factor, boxWidth, boxHeight, rotation * -1)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("%v", err), http.StatusInternalServerError)
-			return
-		}
+	var imgBytes []byte
 
-		err = jpeg.Encode(w, img, nil)
+	size := params["size"]
+	factor, boxWidth, boxHeight := getTransforms(size)
+	if factor != 0 || (boxWidth != 0 && boxHeight != 0) {
+
+		imgBytes = getCachedPhoto(filePath, rotation, modified, size)
+		if len(imgBytes) == 0 {
+			imgBytes, err = transformPhotoThumbnail(filePath, factor, boxWidth, boxHeight, rotation)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("%v", err), http.StatusInternalServerError)
+				return
+			}
+
+			putCachedPhoto(filePath, rotation, modified, size, imgBytes)
+		}
+	} else {
+		file, err := os.Open(filePath)
 		if err != nil {
-		    log.Printf("failed to encode image as JPEG: %v", err)
+			log.Printf("failed to open file %s: %v", filePath, err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
+		defer file.Close()
 
-		// TODO: Cache
-
-	} else {
-    	img, err := ioutil.ReadAll(file)
+    	imgBytes, err = ioutil.ReadAll(file)
 	    if err != nil {
 			log.Printf("failed to read file %s: %v", filePath, err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
+	}
 
-		w.Header().Set("Content-Length", strconv.Itoa(len(img)))
+	w.Header().Set("Content-Length", strconv.Itoa(len(imgBytes)))
 
-		_, err = w.Write(img)
-		if err != nil {
-			log.Printf("failed to write response %s: %v", filePath, err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
-		}
-
-		// TODO: Cache
-		
+	_, err = w.Write(imgBytes)
+	if err != nil {
+		log.Printf("failed to write response %s: %v", filePath, err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
 	}
 }
 
-func transformPhoto(file *os.File, factor int, boxWidth int, boxHeight int, rotation int) (image.Image, error) {
-	img, _, err := image.Decode(file)
+func transformPhotoThumbnail(filePath string, factor int, boxWidth int, boxHeight int, rotation int) ([]byte, error) {
+	if rotation != 0 {
+		log.Printf("Rotation: %d, file %s", rotation, filePath)
+	}
+
+	var err error
+	var img *vips.ImageRef
+	if factor != 0 {
+		img, err = vips.NewImageFromFile(filePath)
+		if err != nil {
+			log.Printf("failed to open file %s: %v", filePath, err)
+			return nil, errors.New("Internal server error")
+		}
+		defer img.Close()
+
+		err = img.Resize(float64(1) / float64(factor), vips.KernelNearest)
+		if err != nil {
+			log.Printf("failed to resize image %s: %v", filePath, err)
+			return nil, errors.New("Internal server error")
+		}
+	} else if (boxWidth != 0 && boxHeight != 0) {
+		img, err = vips.NewThumbnailWithSizeFromFile(filePath, boxWidth, boxHeight, vips.InterestingNone, vips.SizeDown)
+		if err != nil {
+			log.Printf("failed to generate thumbnail from file %s: %v", filePath, err)
+			return nil, errors.New("Internal server error")
+		}
+		defer img.Close()
+	}
+
+	exportParams := vips.JpegExportParams {
+		Quality: 80,
+		Interlace: true,
+		StripMetadata: true,
+	}
+
+	imgBytes, _, err := img.ExportJpeg(&exportParams)
 	if err != nil {
-		log.Printf("failed to decode image from file %s: %v", file.Name(), err)
+		log.Printf("failed to export image for %s: %v", filePath, err)
 		return nil, errors.New("Internal server error")
 	}
 
-	bounds := img.Bounds()
-	origWidth := bounds.Dx()
-	origHeight := bounds.Dy()
-
-	var targetWidth int
-	var targetHeight int
-	if factor != 0 {
-		targetWidth = origWidth / factor
-		targetHeight = origHeight / factor
-	} else if (boxWidth != 0 && boxHeight != 0) {
-		ratioWidth := origWidth / boxWidth
-		ratioHeight := origHeight / boxHeight
-		ratio := math.Max(float64(ratioWidth), float64(ratioHeight))
-
-		targetWidth = origWidth / int(ratio)
-		targetHeight = origHeight / int(ratio)
-	}
-
-	log.Printf("TRANSFORM: rotate: %d, width / height: %d / %d", rotation, targetWidth, targetHeight)
-	img = imaging.Resize(img, targetWidth, targetHeight, imaging.CatmullRom)
-	if (rotation != 0) {
-		img = imaging.Rotate(img, float64(rotation), color.Black)
-	}
-
-	return img, nil
+	return imgBytes, nil
 }
 
 func lookupPhotoInfo(id int) (string, int, string, error) {
-    // Query the database to retrieve the file path for the given ID
     var path string
 	var rotation int
 	var modified string
@@ -215,8 +223,60 @@ func getTransforms(size string) (int, int, int) {
 	}
 }
 
+func getCachedPhoto(path string, rotation int, modified string, size string) []byte {
+	if getLfuCacheMaxCount() == 0 {
+		return []byte{}
+	}
+
+	key := getCachedPhotoKey(path, rotation, modified, size)
+
+	buf := lfuCache[key]
+	if len(buf) != 0 {
+		lfuCacheCounts[key] += 1
+	}
+
+	return buf
+}
+
+func putCachedPhoto(path string, rotation int, modified string, size string, buf []byte) {
+	if getLfuCacheMaxCount() == 0 {
+		return
+	}
+
+    key := getCachedPhotoKey(path, rotation, modified, size)
+
+	lfuCache[key] = buf
+	lfuCacheCounts[key] = lfuCacheCounts[key] + 1
+
+	if len(lfuCache) > getLfuCacheMaxCount() {
+		minUsed := math.MaxInt32
+		minUsedKey := ""
+		for ckey := range lfuCache {
+			if ckey != key && lfuCacheCounts[ckey] < minUsed {
+				minUsed = lfuCacheCounts[ckey]
+				minUsedKey = ckey
+			}
+		}
+
+		if minUsedKey != "" {
+			delete(lfuCache, minUsedKey)
+			delete(lfuCacheCounts, minUsedKey)
+		}
+	}
+}
+
+func getCachedPhotoKey(path string, rotation int, modified string, size string) string {
+    hash := md5.New()
+
+	hash.Write([]byte(path))
+    hash.Write([]byte(fmt.Sprintf("%d", rotation)))
+    hash.Write([]byte(modified))
+    hash.Write([]byte(size))
+
+    return fmt.Sprintf("%x", hash.Sum(nil))
+}
+
 func getParamsFromUrl(r *http.Request) map[string]string {
-    // Retrieve the ID from the URL path
     path := r.URL.Path[len(getRootContext()):]
 	parts := strings.Split(path, "/")
 
@@ -267,11 +327,35 @@ func getRootContext() string {
 	return getEnvDefault("ROOT_CONTEXT", "/photos/photo/")
 }
 
+func getLfuCacheMaxCount() int {
+	return getEnvAsIntDefault("LFU_CACHE_MAX_COUNT", 32)
+}
+
+func getConcurrencyLevel() int {
+	return getEnvAsIntDefault("CONCURRENCY_LEVEL", 4)
+}
+
 func getEnvDefault(key string, defaultVal string) string {
 	val := os.Getenv(key)
 	if val == "" {
-		val = defaultVal
+		return defaultVal
+	} else {
+		return val
 	}
-	return val;
+}
+
+func getEnvAsIntDefault(key string, defaultVal int) int {
+	strVal := os.Getenv(key)
+	if strVal == "" {
+		return defaultVal
+	} else {
+		val, err := strconv.Atoi(strVal)
+		if err != nil {
+			log.Printf("unable to convert env value (%s) for env key %s (%v)", strVal, key, err)
+			return defaultVal
+		} else {
+			return val
+		}
+	}
 }
 
