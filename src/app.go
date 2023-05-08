@@ -5,7 +5,7 @@ import (
     "database/sql"
     "errors"
     "fmt"
-    "io/ioutil"
+    "io"
     "log"
     "math"
     "net/http"
@@ -31,7 +31,7 @@ func main() {
 
     db, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:3306)/%s", getDbUsername(), getDbPassword(), getDbHost(), getDbTable()))
     if err != nil {
-        log.Fatal(fmt.Sprintf("Failure connecting to database (%v)", err))
+        log.Fatalf("Failure connecting to database (%v)", err)
     }
 
     db.SetMaxOpenConns(64)
@@ -98,7 +98,7 @@ func getPhoto(w http.ResponseWriter, r *http.Request) {
         }
         defer file.Close()
 
-        imgBytes, err = ioutil.ReadAll(file)
+        imgBytes, err = io.ReadAll(file)
         if err != nil {
             log.Printf("failed to read file %s: %v", filePath, err)
             http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -127,20 +127,20 @@ func transformPhotoThumbnail(filePath string, factor int, boxWidth int, boxHeigh
         img, err = vips.NewImageFromFile(filePath)
         if err != nil {
             log.Printf("failed to open file %s: %v", filePath, err)
-            return nil, errors.New("Internal server error")
+            return nil, errors.New("internal server error")
         }
         defer img.Close()
 
         err = img.Resize(float64(1) / float64(factor), vips.KernelNearest)
         if err != nil {
             log.Printf("failed to resize image %s: %v", filePath, err)
-            return nil, errors.New("Internal server error")
+            return nil, errors.New("internal server error")
         }
     } else if (boxWidth != 0 && boxHeight != 0) {
         img, err = vips.NewThumbnailWithSizeFromFile(filePath, boxWidth, boxHeight, vips.InterestingNone, vips.SizeDown)
         if err != nil {
             log.Printf("failed to generate thumbnail from file %s: %v", filePath, err)
-            return nil, errors.New("Internal server error")
+            return nil, errors.New("internal server error")
         }
         defer img.Close()
     }
@@ -154,7 +154,7 @@ func transformPhotoThumbnail(filePath string, factor int, boxWidth int, boxHeigh
     imgBytes, _, err := img.ExportJpeg(&exportParams)
     if err != nil {
         log.Printf("failed to export image for %s: %v", filePath, err)
-        return nil, errors.New("Internal server error")
+        return nil, errors.New("internal server error")
     }
 
     return imgBytes, nil
@@ -171,7 +171,7 @@ func lookupPhotoInfo(id int) (string, int, string, error) {
         id).Scan(&path, &rotation, &modified)
     if err != nil {
         log.Printf("failed to find photo with id %d: %v", id, err)
-        return "", 0, "", errors.New(fmt.Sprintf("failed to find photo with id %d", id))
+        return "", 0, "", fmt.Errorf("failed to find photo with id %d", id)
     }
 
     filePath := "/mnt/photos/" + path
@@ -179,7 +179,7 @@ func lookupPhotoInfo(id int) (string, int, string, error) {
     if err != nil {
         if os.IsNotExist(err) {
             log.Printf("photo file (%s) does not exist (%v)", filePath, err)
-            return "", 0, "", errors.New(fmt.Sprintf("failed to find photo with id %d", id))
+            return "", 0, "", fmt.Errorf("failed to find photo with id %d", id)
         }
     }
 
@@ -301,7 +301,7 @@ func getIdParam(params map[string]string) (int, error) {
     id, err := strconv.Atoi(strId)
     if err != nil {
         log.Printf("url contained an invalid id value (%s) (%v)", strId, err)
-        return 0, errors.New(fmt.Sprintf("url contained an invalid id value (%s)", strId))
+        return 0, fmt.Errorf("url contained an invalid id value (%s)", strId)
     }
 
     return id, nil
